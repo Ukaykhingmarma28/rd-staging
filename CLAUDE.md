@@ -9,49 +9,47 @@ Production Docker Compose stack for a WordPress + WooCommerce site. Runs behind 
 ## Architecture
 
 ```
-Traefik (host) → Nginx (reverse proxy + FastCGI cache) → WordPress (PHP-FPM) → MariaDB
-                                                        → Redis (object cache)
+Traefik (host) → Nginx (reverse proxy) → WordPress (PHP-FPM) → MariaDB
+                                        → Redis (object cache)
 ```
 
-All services run on a Docker overlay network (`wordpress_net`). WordPress content is stored in the `wordpress_data` named volume, shared read-write with the WordPress container and read-only with Nginx.
+All services run on a Docker overlay network (`wordpress_net`). WordPress content is in the `wordpress_data` named volume, shared read-write with WordPress and read-only with Nginx.
 
 ### Services & Resource Limits
 
-| Service   | Image                      | CPU | RAM    | Notes                              |
-|-----------|----------------------------|-----|--------|------------------------------------|
-| mariadb   | mariadb:11                 | 2   | 2048M  | InnoDB buffer pool = 1200M         |
-| redis     | redis:7-alpine             | 0.5 | 512M   | allkeys-lru, 512MB maxmemory      |
-| wordpress | wordpress:6-fpm-alpine     | 1   | 2048M  | PHP-FPM dynamic, up to 40 workers  |
-| nginx     | nginx:1.25-alpine          | 0.5 | 512M   | FastCGI cache 1GB disk, 256MB keys |
+| Service   | Image                      | CPU Limit | RAM Limit | Key Tuning                                    |
+|-----------|----------------------------|-----------|-----------|-----------------------------------------------|
+| mariadb   | mariadb:11.8               | 2         | 5120M     | InnoDB buffer pool 3500M, 200 max connections |
+| redis     | redis:8-alpine             | 0.5       | 1536M     | allkeys-lru, 1280MB maxmemory                |
+| wordpress | wordpress:6.9-fpm-alpine   | 4         | 8192M     | PHP-FPM dynamic, 20 max children, JIT enabled |
+| nginx     | nginx:1.28-alpine          | 1         | 512M      | Tiered bot rate limiting, gzip                |
 
 ## Key Configuration Files
 
 - `docker-compose.yml` — Service definitions, volumes, networks, resource limits, Traefik labels
-- `.env.example` — Required environment variables (copy to `.env` and fill in)
-- `nginx/nginx.conf` — Worker tuning, gzip, FastCGI cache zone definition
-- `nginx/default.conf` — Server block: cache bypass rules (logged-in users, WooCommerce cart/checkout, POST, wp-admin), security headers, static asset caching, Cloudflare HTTPS detection via `CF-Visitor`
-- `php/custom.ini` — PHP limits (512M memory, 128M uploads) and OPcache settings (`validate_timestamps=0` — requires cache flush on code deploy)
-- `php/www.conf` — PHP-FPM pool: dynamic PM, 40 max children, slow log at 5s, status/ping endpoints
-- `mariadb/custom.cnf` — InnoDB tuning, slow query log (>1s), utf8mb4
+- `.env.example` — Required env vars: DB creds, `REDIS_PASSWORD`, `DOMAIN`, `WORDPRESS_TABLE_PREFIX`
+- `nginx/nginx.conf` — Worker tuning (auto CPUs, 4096 connections), gzip, server_tokens off
+- `nginx/default.conf` — Server block: 3-tier bot rate limiting, scraper query blocking, security headers, static asset caching, Cloudflare HTTPS detection via `CF-Visitor`
+- `php/custom.ini` — PHP limits (512M memory, 128M uploads), OPcache (256M, `validate_timestamps=0`), JIT (128M buffer, mode 1255)
+- `php/www.conf` — PHP-FPM pool: dynamic PM, 20 max children, 500 max_requests, slow log at 5s
+- `mariadb/custom.cnf` — InnoDB 3500M buffer pool, 512M log files, slow query log (>1s), utf8mb4
 
 ## Common Commands
 
 ```bash
-# Start the stack
+# Start / stop
 docker compose up -d
+docker compose down
 
-# View logs
+# Logs
 docker compose logs -f [service]
 
 # Restart a single service
 docker compose restart nginx
 
-# Enter a container shell
+# Container shells
 docker compose exec wordpress sh
 docker compose exec mariadb mysql -u root -p
-
-# Flush FastCGI cache
-docker compose exec nginx rm -rf /var/cache/nginx/fastcgi/*
 
 # Check PHP-FPM status (from within the network)
 docker compose exec nginx curl http://wordpress:9000/status
@@ -59,8 +57,16 @@ docker compose exec nginx curl http://wordpress:9000/status
 
 ## Important Design Decisions
 
-- **SSL is handled by Cloudflare**, not this stack. Nginx listens on port 80. The `CF-Visitor` header is mapped to pass `HTTPS=on` to PHP so WordPress generates correct URLs.
-- **FastCGI cache bypasses** are critical for WooCommerce: logged-in users, cart, checkout, my-account, POST requests, and wp-admin all skip the cache. The `X-Cache-Status` response header shows HIT/MISS/BYPASS.
-- **OPcache `validate_timestamps=0`** means PHP never checks if files changed on disk. After deploying code/plugin updates, restart the WordPress container or flush OPcache.
-- **Traefik integration** is via deploy labels on the nginx service. The `Host` rule uses the `DOMAIN` env var.
-- The network uses `overlay` driver (for Docker Swarm compatibility). For single-host Docker Compose, this works with `attachable: true`.
+- **SSL is handled by Cloudflare**, not this stack. Nginx listens on port 80 only. The `CF-Visitor` header is mapped to `$cf_https` and passed as `HTTPS` fastcgi_param so WordPress generates correct URLs.
+- **No FastCGI cache** — was removed. Caching relies on Redis object cache and Cloudflare edge.
+- **OPcache `validate_timestamps=0`** — PHP never checks if files changed. After deploying code/plugin updates, restart the WordPress container.
+- **JIT is enabled** (mode 1255, 128M buffer) for uncached WooCommerce request speedup.
+- **3-tier bot rate limiting** in `nginx/default.conf`:
+  - Tier 1 (SEO bots: Google, Bing, social previews): 2r/s with burst=5
+  - Tier 2 (SEO tools, AI bots: Ahrefs, GPTBot, ClaudeBot): 30r/m with burst=3
+  - Tier 3 (generic scrapers: curl, wget, python-requests, empty UA): blocked 403
+  - Scraper query patterns (`per_row=`, price+sort combos): blocked 429
+- **General per-IP PHP rate limit**: 10r/s with burst=30
+- **Traefik integration** via deploy labels on the nginx service. The `Host` rule uses the `DOMAIN` env var.
+- **MariaDB `MARIADB_DISABLE_IO_URING=1`** — workaround for io_uring issues in containerized environments.
+- The network uses `overlay` driver with `attachable: true` (Docker Swarm compatible, works on single-host too).
