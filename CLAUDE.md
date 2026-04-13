@@ -21,7 +21,7 @@ Traefik (host) → Nginx (reverse proxy) → WordPress (PHP-FPM) → MariaDB
 | Service   | Image                      | CPU Limit | RAM Limit | Key Tuning                                    |
 |-----------|----------------------------|-----------|-----------|-----------------------------------------------|
 | mariadb   | mariadb:11.8               | 1.5       | 1536M     | InnoDB buffer pool 1024M, 100 max connections |
-| wordpress | wordpress:6.9-fpm-alpine   | 2         | 2304M     | PHP-FPM dynamic, 8 max children, JIT enabled  |
+| wordpress | wordpress:6.9-fpm-alpine   | 2         | 2304M     | PHP-FPM dynamic, 5 max children, JIT enabled  |
 | nginx     | nginx:1.28-alpine          | 0.5       | 256M      | Tiered bot rate limiting, gzip                |
 
 ## Key Configuration Files
@@ -30,8 +30,8 @@ Traefik (host) → Nginx (reverse proxy) → WordPress (PHP-FPM) → MariaDB
 - `.env.example` — Required env vars: DB creds, `DOMAIN`, `WORDPRESS_TABLE_PREFIX`
 - `nginx/nginx.conf` — Worker tuning (auto CPUs, 1024 connections), gzip, server_tokens off
 - `nginx/default.conf` — Server block: 3-tier bot rate limiting, scraper query blocking, security headers, static asset caching, Cloudflare HTTPS detection via `CF-Visitor`
-- `php/custom.ini` — PHP limits (256M memory, 128M uploads), OPcache (128M, `validate_timestamps=0`), JIT (64M buffer, mode 1255)
-- `php/www.conf` — PHP-FPM pool: dynamic PM, 8 max children, 500 max_requests, slow log at 5s
+- `php/custom.ini` — PHP limits (512M memory, 128M uploads), OPcache (128M, `validate_timestamps=0`), JIT (64M buffer, mode 1255)
+- `php/www.conf` — PHP-FPM pool: dynamic PM, 5 max children, 500 max_requests, slow log at 5s
 - `mariadb/custom.cnf` — InnoDB 1024M buffer pool, 128M log files, slow query log (>1s), utf8mb4
 
 All config files are mounted read-only (`:ro`). Changes require a container restart/recreate, not just a service reload.
